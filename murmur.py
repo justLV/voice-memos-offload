@@ -55,6 +55,13 @@ GROKBOT_CONN = Path("~/.grokbot/local-exec-daemon-connection.json").expanduser()
 
 ASR_MODEL = os.environ.get("MURMUR_ASR_MODEL", "mlx-community/parakeet-tdt-0.6b-v3")
 
+# The answer we want is one token ("YES" or "NO"), but many current models spend
+# reasoning tokens before emitting any content — and a model that hits its cap
+# mid-thought returns a message with no content at all. So the cap is only a
+# runaway guard, deliberately far above what the reply needs. Being generous
+# costs nothing when the model is not a thinking one: it still emits one token.
+REPLY_BUDGET = 2048
+
 # Every provider below speaks the OpenAI chat-completions dialect, so one code
 # path covers all three. Models are pinned here and overridable by env, since
 # hosted model names get retired.
@@ -66,7 +73,7 @@ PROVIDERS = {
         # so a 70B would be wasted latency.
         "chat": "llama-3.1-8b-instant",
         "asr": "whisper-large-v3-turbo",
-        "params": {"temperature": 0, "max_tokens": 8},
+        "params": {"temperature": 0, "max_tokens": REPLY_BUDGET},
     },
     "openai": {
         "base": "https://api.openai.com/v1",
@@ -77,16 +84,14 @@ PROVIDERS = {
         "asr": "gpt-transcribe",
         # GPT-5-family rejects max_tokens outright; it wants
         # max_completion_tokens, and pins its own temperature.
-        "params": {"max_completion_tokens": 256},
+        "params": {"max_completion_tokens": REPLY_BUDGET},
     },
     "gemini": {
         "base": "https://generativelanguage.googleapis.com/v1beta/openai",
         "key": "GEMINI_API_KEY",
         "chat": "gemini-3.5-flash-lite",
         "asr": None,  # dedicated ASR beats it; use local or another provider
-        # Needs real headroom: with a tiny cap it hits the limit before
-        # emitting any content at all.
-        "params": {"temperature": 0, "max_tokens": 256},
+        "params": {"temperature": 0, "max_tokens": REPLY_BUDGET},
     },
 }
 
@@ -266,6 +271,17 @@ def classify_heuristic(text: str) -> bool:
     return score >= 2
 
 
+def parse_verdict(answer: str) -> bool | None:
+    """Pull YES/NO out of a model reply. None if it never committed.
+
+    Takes the *last* standalone verdict rather than the first word, since a
+    model that thinks out loud may lead with preamble ("The speaker is asking
+    someone... YES") before answering.
+    """
+    verdicts = re.findall(r"\b(YES|NO)\b", (answer or "").upper())
+    return None if not verdicts else verdicts[-1] == "YES"
+
+
 def pick_provider(preferred: str | None) -> str | None:
     """Use whichever provider the user actually has a key for.
 
@@ -301,12 +317,13 @@ def classify_llm(text: str, provider: str) -> bool | None:
             timeout=20,
         )
         r.raise_for_status()
-        # A truncated reply can omit "content" entirely, so don't index blindly.
+        # A reply truncated mid-thought can omit "content" entirely, so don't
+        # index blindly.
         answer = (r.json()["choices"][0]["message"].get("content") or "").strip()
-        if not answer:
-            print("  ! classifier returned nothing, using heuristic")
-            return None
-        return answer.upper().startswith("YES")
+        verdict = parse_verdict(answer)
+        if verdict is None:
+            print(f"  ! classifier gave no verdict ({answer[:60]!r}), using heuristic")
+        return verdict
     except Exception as e:
         print(f"  ! classifier unavailable ({type(e).__name__}), using heuristic")
         return None

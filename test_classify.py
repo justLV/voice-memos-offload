@@ -54,7 +54,28 @@ for t in NOTES:
     if got:
         fails.append(("note", t))
 
-total = len(REQUESTS) + len(NOTES)
+# Model replies aren't always a bare YES/NO — thinking models may reason first,
+# and a reply truncated mid-thought may carry no verdict at all.
+VERDICTS = [
+    ("YES", True),
+    ("NO", False),
+    ("yes", True),
+    ("  NO\n", False),
+    ("The speaker is addressing an assistant directly, so YES", True),
+    ("This is a note to self. NO", False),
+    ("Let me think. It could be YES, but they're talking to themselves, so NO", False),
+    ("I'm not sure what you mean", None),
+    ("", None),
+]
+print("\nverdict parsing:")
+for reply, expect in VERDICTS:
+    got = murmur.parse_verdict(reply)
+    ok = got is expect
+    print(f"  {'ok  ' if ok else 'MISS'} {reply[:52]!r} -> {got}")
+    if not ok:
+        fails.append(("verdict", reply))
+
+total = len(REQUESTS) + len(NOTES) + len(VERDICTS)
 print(f"\n{total - len(fails)}/{total} correct")
 if fails:
     print("\nmisclassified:")
