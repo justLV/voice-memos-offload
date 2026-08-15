@@ -62,20 +62,31 @@ PROVIDERS = {
     "groq": {
         "base": "https://api.groq.com/openai/v1",
         "key": "GROQ_API_KEY",
-        "chat": "llama-3.3-70b-versatile",
+        # Smallest/fastest instruct model (~560 tok/s). This is a YES/NO call,
+        # so a 70B would be wasted latency.
+        "chat": "llama-3.1-8b-instant",
         "asr": "whisper-large-v3-turbo",
+        "params": {"temperature": 0, "max_tokens": 8},
     },
     "openai": {
         "base": "https://api.openai.com/v1",
         "key": "OPENAI_API_KEY",
-        "chat": "gpt-4o-mini",
-        "asr": "gpt-4o-transcribe",
+        "chat": "gpt-5.4-nano",
+        # gpt-transcribe is the async/batch model. Its sibling
+        # gpt-live-transcribe is for streaming Realtime sessions, not files.
+        "asr": "gpt-transcribe",
+        # GPT-5-family rejects max_tokens outright; it wants
+        # max_completion_tokens, and pins its own temperature.
+        "params": {"max_completion_tokens": 256},
     },
     "gemini": {
         "base": "https://generativelanguage.googleapis.com/v1beta/openai",
         "key": "GEMINI_API_KEY",
-        "chat": "gemini-flash-lite-latest",
+        "chat": "gemini-3.5-flash-lite",
         "asr": None,  # dedicated ASR beats it; use local or another provider
+        # Needs real headroom: with a tiny cap it hits the limit before
+        # emitting any content at all.
+        "params": {"temperature": 0, "max_tokens": 256},
     },
 }
 
@@ -108,7 +119,7 @@ class Config:
     notes_dir: Path | None
     asr: str
     classifier: str
-    provider: str
+    provider: str | None
     prefix: str
     poll: float
     dry_run: bool
@@ -255,6 +266,20 @@ def classify_heuristic(text: str) -> bool:
     return score >= 2
 
 
+def pick_provider(preferred: str | None) -> str | None:
+    """Use whichever provider the user actually has a key for.
+
+    Without this, defaulting to one provider would silently fall back to the
+    heuristic for someone who set a different provider's key.
+    """
+    if preferred:
+        return preferred
+    for name in ("groq", "openai", "gemini"):  # fastest first
+        if os.environ.get(PROVIDERS[name]["key"]):
+            return name
+    return None
+
+
 def classify_llm(text: str, provider: str) -> bool | None:
     """Ask a fast hosted model. Returns None if unavailable, so we can fall back."""
     p = PROVIDERS[provider]
@@ -271,14 +296,17 @@ def classify_llm(text: str, provider: str) -> bool | None:
                     {"role": "system", "content": CLASSIFY_PROMPT},
                     {"role": "user", "content": text},
                 ],
-                "temperature": 0,
-                "max_tokens": 4,
+                **p["params"],
             },
             timeout=20,
         )
         r.raise_for_status()
-        answer = r.json()["choices"][0]["message"]["content"] or ""
-        return answer.strip().upper().startswith("YES")
+        # A truncated reply can omit "content" entirely, so don't index blindly.
+        answer = (r.json()["choices"][0]["message"].get("content") or "").strip()
+        if not answer:
+            print("  ! classifier returned nothing, using heuristic")
+            return None
+        return answer.upper().startswith("YES")
     except Exception as e:
         print(f"  ! classifier unavailable ({type(e).__name__}), using heuristic")
         return None
@@ -286,11 +314,13 @@ def classify_llm(text: str, provider: str) -> bool | None:
 
 def classify(text: str, cfg: Config) -> bool:
     if cfg.classifier in ("auto", "llm"):
-        verdict = classify_llm(text, cfg.provider)
-        if verdict is not None:
-            return verdict
+        if cfg.provider:
+            verdict = classify_llm(text, cfg.provider)
+            if verdict is not None:
+                return verdict
         if cfg.classifier == "llm":
-            sys.exit(f"! --classifier llm needs {PROVIDERS[cfg.provider]['key']}")
+            keys = ", ".join(p["key"] for p in PROVIDERS.values())
+            sys.exit(f"! --classifier llm needs one of: {keys}")
     return classify_heuristic(text)
 
 
@@ -484,8 +514,9 @@ def main() -> None:
     ap.add_argument("--classifier", default=os.environ.get("MURMUR_CLASSIFIER", "auto"),
                     choices=["auto", "llm", "heuristic"],
                     help="auto: use an API key if present, else a local rule")
-    ap.add_argument("--provider", default=os.environ.get("MURMUR_PROVIDER", "groq"),
-                    choices=sorted(PROVIDERS))
+    ap.add_argument("--provider", default=os.environ.get("MURMUR_PROVIDER"),
+                    choices=sorted(PROVIDERS),
+                    help="default: whichever provider you have a key for")
     ap.add_argument("--prefix", default=os.environ.get("MURMUR_PREFIX", "[from voice memo] "))
     ap.add_argument("--poll", type=float, default=3.0)
     ap.add_argument("--backfill", type=int, default=0, metavar="N",
@@ -503,13 +534,19 @@ def main() -> None:
         memos_dir=memos, sink=a.sink, webhook_url=a.webhook_url,
         webhook_token=a.webhook_token,
         notes_dir=Path(a.notes_dir).expanduser() if a.notes_dir else None,
-        asr=a.asr, classifier=a.classifier, provider=a.provider,
+        asr=a.asr, classifier=a.classifier, provider=pick_provider(a.provider),
         prefix=a.prefix, poll=a.poll, dry_run=a.dry_run,
     )
 
     first_run = not SEEN_FILE.exists()
+    # Say plainly which classifier is actually in play, so a missing key is
+    # visible up front rather than a silent downgrade.
+    if cfg.classifier != "heuristic" and cfg.provider:
+        how = f"{cfg.provider}:{os.environ.get('MURMUR_CHAT_MODEL', PROVIDERS[cfg.provider]['chat'])}"
+    else:
+        how = "heuristic (no API key — set one for sharper results)"
     print(f"murmur — watching {memos}")
-    print(f"  asr={cfg.asr}  classifier={cfg.classifier}  sink={cfg.sink}"
+    print(f"  asr={cfg.asr}  classifier={how}  sink={cfg.sink}"
           + ("  [dry run]" if cfg.dry_run else ""))
     seen = baseline(memos, a.backfill) if first_run else load_seen()
 

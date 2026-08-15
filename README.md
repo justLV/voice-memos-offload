@@ -111,13 +111,33 @@ cp .env.example .env
 # GROQ_API_KEY=gsk_...
 ```
 
-murmur picks it up automatically. Groq is the default because it's fast and has
-a usable free tier; `--provider openai` and `--provider gemini` also work. The
-same key can do transcription too if you'd rather not run the local model:
+murmur picks up whichever key you have — no need to tell it which provider you
+meant. It prints the model it settled on at startup:
+
+```
+asr=local  classifier=groq:llama-3.1-8b-instant  sink=grokbot
+```
+
+| Provider | Classifier | Transcription |
+|---|---|---|
+| `groq` | `llama-3.1-8b-instant` | `whisper-large-v3-turbo` |
+| `openai` | `gpt-5.4-nano` | `gpt-transcribe` |
+| `gemini` | `gemini-3.5-flash-lite` | — use local or another provider |
+
+Groq is preferred when several keys are present, being the fastest and having a
+usable free tier. Force one with `--provider`. Pin a different model with
+`MURMUR_CHAT_MODEL`.
+
+The same key can do transcription too, if you'd rather not run the local model
+(and it's the way to run murmur on an Intel Mac):
 
 ```bash
 uv run murmur.py --asr groq
 ```
+
+Note `gpt-transcribe` is OpenAI's batch model. Its sibling `gpt-live-transcribe`
+is for streaming Realtime sessions and won't work here — murmur hands it
+completed files.
 
 ## Options
 
@@ -128,7 +148,7 @@ uv run murmur.py --asr groq
 | `--notes-dir` | *discard* | keep non-requests as markdown |
 | `--asr` | `local` | `local`, `groq`, `openai` |
 | `--classifier` | `auto` | `auto`, `llm`, `heuristic` |
-| `--provider` | `groq` | which API to use when a key exists |
+| `--provider` | *auto* | force `groq`, `openai` or `gemini` |
 | `--memos-dir` | *auto-detected* | override the Voice Memos folder |
 | `--prefix` | `[from voice memo] ` | prepended for Grok Bot |
 | `--backfill N` | `0` | process N recent memos on first run |
