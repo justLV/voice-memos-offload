@@ -70,6 +70,17 @@ installed and signed in, murmur reads its local gateway credentials and sends
 straight into your chat thread. Credentials rotate on restart, so they're
 re-read every time.
 
+By default it sends to whichever agent is *currently active* in the app — so if
+you switch agents, your next memo lands somewhere else. Pin one instead:
+
+```bash
+uv run murmur.py --agents          # see them
+uv run murmur.py --agent Boticelli # always send here
+```
+
+Or set `MURMUR_AGENT=Boticelli` in `.env`. Pick an agent that knows how to
+delegate, and let it decide what to do with each request.
+
 **Anything else** — Hermes, openclaw, n8n, Home Assistant, a Shortcut, your own
 server:
 
@@ -144,6 +155,8 @@ completed files.
 | Flag | Default | |
 |---|---|---|
 | `--sink` | `grokbot` | `grokbot` or `webhook` |
+| `--agent` | *active one* | Grok Bot agent to send to, by name |
+| `--agents` | — | list your agents and exit |
 | `--webhook-url` | — | where to POST |
 | `--notes-dir` | *discard* | keep non-requests as markdown |
 | `--asr` | `local` | `local`, `groq`, `openai` |

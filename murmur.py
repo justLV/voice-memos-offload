@@ -128,6 +128,7 @@ class Config:
     prefix: str
     poll: float
     dry_run: bool
+    agent: str | None = None
 
 
 def load_dotenv(path: Path = Path(".env")) -> None:
@@ -345,28 +346,68 @@ def classify(text: str, cfg: Config) -> bool:
 # Sinks
 # ---------------------------------------------------------------------------
 
-def send_grokbot(text: str, cfg: Config) -> bool:
-    """Push into the Grok Bot desktop app via its local gateway.
-
-    Credentials rotate whenever the agent box restarts, so they are re-read on
-    every send rather than cached.
-    """
+def grokbot_conn() -> tuple[str, dict] | None:
+    """Base URL + headers. Credentials rotate when the box restarts, so this is
+    re-read on every use rather than cached."""
     if not GROKBOT_CONN.exists():
         print(f"  ! no Grok Bot credentials at {GROKBOT_CONN}")
         print("    Is the Grok Bot desktop app installed and signed in?")
-        return False
+        return None
     conn = json.loads(GROKBOT_CONN.read_text())
-    base = conn["baseUrl"].rstrip("/")
-    headers = {
+    return conn["baseUrl"].rstrip("/"), {
         "authorization": f"Bearer {conn['token']}",
         "content-type": "application/json",
         **(conn.get("headers") or {}),
     }
-    agent_id = httpx.get(f"{base}/health", headers=headers, timeout=20).json().get(
-        "activeAgentId")
-    if not agent_id:
-        print("  ! Grok Bot reported no active agent")
+
+
+def grokbot_agents(base: str, headers: dict) -> list[dict]:
+    r = httpx.post(f"{base}/api/listAgents", headers=headers, json={}, timeout=20)
+    r.raise_for_status()
+    return r.json()
+
+
+def resolve_agent(base: str, headers: dict, cfg: Config) -> tuple[str | None, str]:
+    """Find the agent to send to. Returns (agent_id, human label).
+
+    With no agent configured this falls back to whichever one is frontmost in
+    the app, which is rarely what you want.
+    """
+    want = cfg.agent
+    if not want:
+        active = httpx.get(f"{base}/health", headers=headers, timeout=20).json().get(
+            "activeAgentId")
+        return active, "whichever agent is active"
+
+    agents = grokbot_agents(base, headers)
+    lowered = want.lower()
+    for match in (lambda a: a["id"] == want,
+                  lambda a: (a.get("name") or "").lower() == lowered,
+                  lambda a: lowered in (a.get("name") or "").lower()):
+        hits = [a for a in agents if match(a)]
+        if len(hits) == 1:
+            return hits[0]["id"], hits[0].get("name") or hits[0]["id"]
+        if len(hits) > 1:
+            names = ", ".join(repr(a.get("name")) for a in hits)
+            print(f"  ! {want!r} matches several agents: {names}")
+            return None, want
+
+    print(f"  ! no agent named {want!r}. Available: "
+          + ", ".join(repr(a.get('name')) for a in agents))
+    return None, want
+
+
+def send_grokbot(text: str, cfg: Config) -> bool:
+    """Push into the Grok Bot desktop app via its local gateway."""
+    got = grokbot_conn()
+    if got is None:
         return False
+    base, headers = got
+
+    agent_id, label = resolve_agent(base, headers, cfg)
+    if not agent_id:
+        return False
+    print(f"  → {label}")
     now = int(time.time() * 1000)
     r = httpx.post(
         f"{base}/api/sendPrompt",
@@ -496,7 +537,8 @@ def handle(path: Path, cfg: Config) -> None:
 
     message = f"{cfg.prefix}{text}" if cfg.sink == "grokbot" else text
     if cfg.dry_run:
-        print(f"  REQUEST → would send to {cfg.sink}: {message}")
+        target = f"grokbot/{cfg.agent or 'active agent'}" if cfg.sink == "grokbot" else cfg.sink
+        print(f"  REQUEST → would send to {target}: {message}")
         mark_seen(path.name)
         return
 
@@ -534,6 +576,11 @@ def main() -> None:
     ap.add_argument("--provider", default=os.environ.get("MURMUR_PROVIDER"),
                     choices=sorted(PROVIDERS),
                     help="default: whichever provider you have a key for")
+    ap.add_argument("--agent", default=os.environ.get("MURMUR_AGENT"),
+                    help="Grok Bot agent to send to, by name or id "
+                         "(default: whichever is active in the app)")
+    ap.add_argument("--agents", action="store_true",
+                    help="list your Grok Bot agents and exit")
     ap.add_argument("--prefix", default=os.environ.get("MURMUR_PREFIX", "[from voice memo] "))
     ap.add_argument("--poll", type=float, default=3.0)
     ap.add_argument("--backfill", type=int, default=0, metavar="N",
@@ -542,6 +589,21 @@ def main() -> None:
     ap.add_argument("--dry-run", action="store_true",
                     help="print what would be sent, send nothing")
     a = ap.parse_args()
+
+    if a.agents:
+        got = grokbot_conn()
+        if got is None:
+            sys.exit(1)
+        base, headers = got
+        active = httpx.get(f"{base}/health", headers=headers, timeout=20).json().get(
+            "activeAgentId")
+        for ag in grokbot_agents(base, headers):
+            mark = "*" if ag["id"] == active else " "
+            desc = (ag.get("description") or "").replace("\n", " ")[:58]
+            print(f" {mark} {ag.get('name', '?'):<26} {desc}")
+        print("\n * = currently active in the app")
+        print("   pin one with --agent NAME or MURMUR_AGENT=NAME")
+        return
 
     if not shutil.which("afconvert"):
         sys.exit("! afconvert not found — murmur needs macOS.")
@@ -553,6 +615,7 @@ def main() -> None:
         notes_dir=Path(a.notes_dir).expanduser() if a.notes_dir else None,
         asr=a.asr, classifier=a.classifier, provider=pick_provider(a.provider),
         prefix=a.prefix, poll=a.poll, dry_run=a.dry_run,
+        agent=a.agent,
     )
 
     first_run = not SEEN_FILE.exists()
@@ -562,8 +625,11 @@ def main() -> None:
         how = f"{cfg.provider}:{os.environ.get('MURMUR_CHAT_MODEL', PROVIDERS[cfg.provider]['chat'])}"
     else:
         how = "heuristic (no API key — set one for sharper results)"
+    where = cfg.sink
+    if cfg.sink == "grokbot":
+        where += f"/{cfg.agent}" if cfg.agent else "/active agent (set --agent to pin one)"
     print(f"murmur — watching {memos}")
-    print(f"  asr={cfg.asr}  classifier={how}  sink={cfg.sink}"
+    print(f"  asr={cfg.asr}  classifier={how}  sink={where}"
           + ("  [dry run]" if cfg.dry_run else ""))
     seen = baseline(memos, a.backfill) if first_run else load_seen()
 
