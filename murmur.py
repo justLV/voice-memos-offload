@@ -7,7 +7,7 @@
 # ]
 # ///
 """
-murmur — talk to your agent by leaving yourself a voice memo.
+Voice Memos Offload — talk to your agent by leaving yourself a voice memo.
 
 Watches Apple Voice Memos. Transcribes locally on your Mac. Decides whether what
 you said was a request for an agent or just a note to yourself. Sends the
@@ -485,7 +485,7 @@ def mark_seen(name: str) -> None:
 def baseline(memos: Path, keep_last: int) -> set[str]:
     """First run: mark existing memos as seen so we don't replay your history.
 
-    Without this, installing murmur would fire every memo you have ever recorded
+    Without this, installing this would fire every memo you have ever recorded
     at your agent. `--backfill N` opts the N most recent ones back in.
     """
     files = sorted(memos.glob("*.m4a"), key=lambda f: f.stat().st_mtime)
@@ -544,10 +544,13 @@ def handle(path: Path, cfg: Config) -> None:
 
     try:
         ok = SINKS[cfg.sink](message, cfg)
-        print(f"  REQUEST → sent to {cfg.sink}" if ok else "  ! send rejected")
     except Exception as e:
         print(f"  ! send failed ({type(e).__name__}: {e}) — will retry next pass")
         return  # deliberately not marked seen, so it retries
+    if not ok:
+        print("  ! send rejected — will retry next pass")
+        return  # same: never mark a memo done when it did not go anywhere
+    print(f"  REQUEST → sent to {cfg.sink}")
     mark_seen(path.name)
 
 
@@ -606,7 +609,7 @@ def main() -> None:
         return
 
     if not shutil.which("afconvert"):
-        sys.exit("! afconvert not found — murmur needs macOS.")
+        sys.exit("! afconvert not found — Voice Memos Offload needs macOS.")
 
     memos = find_memos_dir(a.memos_dir)
     cfg = Config(
@@ -618,6 +621,15 @@ def main() -> None:
         agent=a.agent,
     )
 
+    # Resolve a named agent once, up front: a typo should stop us here rather
+    # than fail on every memo forever.
+    if cfg.sink == "grokbot" and cfg.agent:
+        got = grokbot_conn()
+        if got is None:
+            sys.exit(1)
+        if not resolve_agent(*got, cfg)[0]:
+            sys.exit(1)
+
     first_run = not SEEN_FILE.exists()
     # Say plainly which classifier is actually in play, so a missing key is
     # visible up front rather than a silent downgrade.
@@ -628,7 +640,7 @@ def main() -> None:
     where = cfg.sink
     if cfg.sink == "grokbot":
         where += f"/{cfg.agent}" if cfg.agent else "/active agent (set --agent to pin one)"
-    print(f"murmur — watching {memos}")
+    print(f"Voice Memos Offload — watching {memos}")
     print(f"  asr={cfg.asr}  classifier={how}  sink={where}"
           + ("  [dry run]" if cfg.dry_run else ""))
     seen = baseline(memos, a.backfill) if first_run else load_seen()

@@ -1,10 +1,10 @@
-# murmur
+# Voice Memos Offload
 
 **Leave yourself a voice memo. Your agent picks it up.**
 
-Record a memo on your iPhone or Mac. murmur notices it, transcribes it locally,
-works out whether you were talking *to* someone or just thinking out loud, and
-forwards the requests to your agent. Notes stay yours.
+Record a memo on your iPhone or Mac. Voice Memos Offload picks it up, transcribes
+it locally, works out whether you were talking *to* someone or just thinking out
+loud, and forwards the requests to your agent. Notes stay yours.
 
 ```
 "Can you check what spots are free for Pilates on Sunday?"   → sent to your agent
@@ -43,19 +43,19 @@ common cases right. Add a key and it upgrades itself to a hosted model.
 - **Apple Silicon Mac** — parakeet-mlx is MLX-based. (Use `--asr groq` or
   `--asr openai` on Intel.)
 - **[uv](https://docs.astral.sh/uv/getting-started/installation/)**
-- No ffmpeg needed. murmur transcodes with `afconvert`, which ships with macOS.
+- No ffmpeg needed. It transcodes with `afconvert`, which ships with macOS.
 
 ## First run
 
 ```bash
-git clone <this repo> && cd murmur
+git clone <this repo> && cd voice-memos-offload
 uv run murmur.py --dry-run
 ```
 
 `--dry-run` prints what it *would* send without sending anything. Good way to
 watch it think before you point it at a live agent.
 
-murmur marks every memo you already have as seen on first launch, so it will
+It marks every memo you already have as seen on first launch, so it will
 never dump your back catalogue at your agent. To deliberately process recent
 ones:
 
@@ -66,7 +66,7 @@ uv run murmur.py --backfill 3
 ## Sending somewhere
 
 **Grok Bot** (default) needs no configuration at all. If the desktop app is
-installed and signed in, murmur reads its local gateway credentials and sends
+installed and signed in, it reads its local gateway credentials and sends
 straight into your chat thread. Credentials rotate on restart, so they're
 re-read every time.
 
@@ -75,10 +75,10 @@ you switch agents, your next memo lands somewhere else. Pin one instead:
 
 ```bash
 uv run murmur.py --agents          # see them
-uv run murmur.py --agent Boticelli # always send here
+uv run murmur.py --agent Assistant  # always send here
 ```
 
-Or set `MURMUR_AGENT=Boticelli` in `.env`. Pick an agent that knows how to
+Or set `MURMUR_AGENT=Assistant` in `.env`. Pick an agent that knows how to
 delegate, and let it decide what to do with each request.
 
 **Anything else** — Hermes, openclaw, n8n, Home Assistant, a Shortcut, your own
@@ -103,7 +103,7 @@ Set `MURMUR_WEBHOOK_TOKEN` to have it sent as a bearer token.
 
 ## Keeping your notes
 
-By default, memos classified as notes are logged and discarded — murmur is a
+By default, memos classified as notes are logged and discarded — this is a
 pipe to your agent, not a note app. If you'd rather keep them, point it at a
 folder and they'll be written as dated markdown with front matter:
 
@@ -122,7 +122,7 @@ cp .env.example .env
 # GROQ_API_KEY=gsk_...
 ```
 
-murmur picks up whichever key you have — no need to tell it which provider you
+It picks up whichever key you have — no need to tell it which provider you
 meant. It prints the model it settled on at startup:
 
 ```
@@ -140,14 +140,14 @@ usable free tier. Force one with `--provider`. Pin a different model with
 `MURMUR_CHAT_MODEL`.
 
 The same key can do transcription too, if you'd rather not run the local model
-(and it's the way to run murmur on an Intel Mac):
+(and it's the way to run it on an Intel Mac):
 
 ```bash
 uv run murmur.py --asr groq
 ```
 
 Note `gpt-transcribe` is OpenAI's batch model. Its sibling `gpt-live-transcribe`
-is for streaming Realtime sessions and won't work here — murmur hands it
+is for streaming Realtime sessions and won't work here — it is handed
 completed files.
 
 ## Options
@@ -199,7 +199,8 @@ occasionally mangles proper nouns. Try a bigger model with
 uv run test_classify.py
 ```
 
-18 realistic memos, requests and notes, checked against the no-API rule.
+18 realistic memos (requests and notes) plus 9 verdict-parsing cases, all
+checked against the no-API rule.
 
 ## Notes
 
