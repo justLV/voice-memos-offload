@@ -66,7 +66,7 @@ uv run murmur.py --backfill 3
 ## Sending somewhere
 
 **Grok Bot** (default) needs no configuration at all. If the desktop app is
-installed and signed in, it reads its local gateway credentials and sends
+installed and signed in, it reads the credentials stored on your machine and sends
 straight into your chat thread. Credentials rotate on restart, so they're
 re-read every time.
 
@@ -204,7 +204,14 @@ checked against the no-API rule.
 
 ## Notes
 
-The Grok Bot transport is an internal gateway with no official API. It works,
-but it may change between app versions. The webhook sink is the stable option.
+Grok Bot has no official API and no CLI. The `grokbot` sink drives the same
+undocumented HTTP gateway the desktop app itself uses when you type in the chat
+box — `POST /api/sendPrompt`, with `listAgents` for the roster — authenticated
+with credentials the app writes to `~/.grokbot/` and rotates. It is not a
+localhost endpoint: the call goes over HTTPS to the VM your agent runs on, and
+only the credentials are local.
+
+It works, and it is unsupported. Expect it to break on app updates. The webhook
+sink is the stable option.
 
 MIT.

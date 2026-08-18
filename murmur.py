@@ -398,7 +398,11 @@ def resolve_agent(base: str, headers: dict, cfg: Config) -> tuple[str | None, st
 
 
 def send_grokbot(text: str, cfg: Config) -> bool:
-    """Push into the Grok Bot desktop app via its local gateway."""
+    """Push into the Grok Bot desktop app via its HTTP gateway.
+
+    Not a localhost API: the app talks to your agent VM over a public HTTPS
+    host, and the credentials for it happen to live on your machine.
+    """
     got = grokbot_conn()
     if got is None:
         return False
