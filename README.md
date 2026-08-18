@@ -1,17 +1,6 @@
 # Voice Memos Offload
 
-**Leave yourself a voice memo. Your agent picks it up.**
-
-Record a memo on your iPhone or Mac. Voice Memos Offload picks it up, transcribes
-it locally, works out whether you were talking *to* someone or just thinking out
-loud, and forwards the requests to your agent. Notes stay yours.
-
-```
-"Can you check what spots are free for Pilates on Sunday?"   → sent to your agent
-"I should really start going to bed earlier"                 → left alone
-```
-
-One file. One command. No server, no signup, no API key.
+Run this on an always on Mac device. Any voice memos you record from any iCloud sync'd Apple device will be transcribed, and routed as either a request to your agent or to your notes database.
 
 ```bash
 uv run murmur.py
