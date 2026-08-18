@@ -6,72 +6,72 @@ Run this on an always on Mac device. Any voice memos you record from any iCloud 
 uv run murmur.py
 ```
 
-That's the whole install. [uv](https://docs.astral.sh/uv/) reads the dependencies
-declared inside `murmur.py` and builds a throwaway environment on the spot.
+There is no install step. uv reads the dependencies declared at the top of
+`murmur.py` and sets up an environment for you.
 
----
+```
+"Can you check what spots are free for Pilates on Sunday?"   sent to your agent
+"I should really start going to bed earlier"                 kept as a note
+```
 
 ## How it works
 
 ```
-Voice Memos  →  parakeet-mlx  →  classifier  →  your agent
-  (.m4a)        on-device ASR    request or       Grok Bot
-                                    note?         or webhook
+Voice Memos  ->  parakeet-mlx  ->  classifier  ->  your agent
+  (.m4a)         on-device ASR    request or        Grok Bot
+                                     note?          or webhook
 ```
 
-Transcription runs **on your Mac** via
-[parakeet-mlx](https://github.com/senstella/parakeet-mlx) — no audio leaves the
-machine, and it's fast (about a second for a ten-second memo once the model is
-warm).
+Transcription runs on your Mac with
+[parakeet-mlx](https://github.com/senstella/parakeet-mlx), so no audio is
+uploaded. It takes about a second for a ten second memo once the model is loaded.
 
-Classification defaults to a local rule that needs no API key and gets the
-common cases right. Add a key and it upgrades itself to a hosted model.
+Classification uses a local rule by default, which needs no API key. Add a key
+and it uses a hosted model instead.
 
 ## Requirements
 
-- **Apple Silicon Mac** — parakeet-mlx is MLX-based. (Use `--asr groq` or
-  `--asr openai` on Intel.)
-- **[uv](https://docs.astral.sh/uv/getting-started/installation/)**
-- No ffmpeg needed. It transcodes with `afconvert`, which ships with macOS.
+- Apple Silicon Mac, since parakeet-mlx uses MLX. On Intel, use `--asr groq` or
+  `--asr openai`.
+- [uv](https://docs.astral.sh/uv/getting-started/installation/)
+- No ffmpeg. Audio is converted with `afconvert`, which comes with macOS.
 
 ## First run
 
 ```bash
-git clone <this repo> && cd voice-memos-offload
+git clone https://github.com/justLV/voice-memos-offload
+cd voice-memos-offload
 uv run murmur.py --dry-run
 ```
 
-`--dry-run` prints what it *would* send without sending anything. Good way to
-watch it think before you point it at a live agent.
+`--dry-run` prints what it would send, without sending it.
 
-It marks every memo you already have as seen on first launch, so it will
-never dump your back catalogue at your agent. To deliberately process recent
-ones:
+On the first run it marks your existing memos as already seen, so it will not
+send your back catalogue anywhere. To process recent ones anyway:
 
 ```bash
 uv run murmur.py --backfill 3
 ```
 
-## Sending somewhere
+## Where requests go
 
-**Grok Bot** (default) needs no configuration at all. If the desktop app is
-installed and signed in, it reads the credentials stored on your machine and sends
-straight into your chat thread. Credentials rotate on restart, so they're
-re-read every time.
+Grok Bot is the default and needs no setup. If the desktop app is installed and
+signed in, the credentials it stores on your machine are used to send into your
+chat thread.
 
-By default it sends to whichever agent is *currently active* in the app — so if
-you switch agents, your next memo lands somewhere else. Pin one instead:
+By default it sends to whichever agent is active in the app, so switching agents
+changes where your memos land. Pin one instead:
 
 ```bash
-uv run murmur.py --agents          # see them
+uv run murmur.py --agents           # list them
 uv run murmur.py --agent Assistant  # always send here
 ```
 
-Or set `MURMUR_AGENT=Assistant` in `.env`. Pick an agent that knows how to
-delegate, and let it decide what to do with each request.
+Or set `MURMUR_AGENT=Assistant` in `.env`. Pick an agent that can delegate, and
+let it decide what to do with each request.
 
-**Anything else** — Hermes, openclaw, n8n, Home Assistant, a Shortcut, your own
-server:
+For anything else, such as Hermes, openclaw, n8n, Home Assistant, a Shortcut or
+your own server:
 
 ```bash
 uv run murmur.py --sink webhook --webhook-url https://example.com/hook
@@ -92,27 +92,24 @@ Set `MURMUR_WEBHOOK_TOKEN` to have it sent as a bearer token.
 
 ## Keeping your notes
 
-By default, memos classified as notes are logged and discarded — this is a
-pipe to your agent, not a note app. If you'd rather keep them, point it at a
-folder and they'll be written as dated markdown with front matter:
+Notes are logged and then discarded, since this is a pipe to your agent rather
+than a note app. To keep them as dated markdown instead:
 
 ```bash
-uv run murmur.py --notes-dir ~/Library/Mobile\ Documents/iCloud~md~obsidian/Documents/voice
+uv run murmur.py --notes-dir ~/Documents/voice-notes
 ```
 
-## Better classification (optional)
+## Using an API key
 
-The built-in rule is deliberately conservative — when in doubt, it treats
-something as a note rather than pestering your agent. For sharper results, drop
-a key in `.env`:
+The built-in rule is conservative and treats anything ambiguous as a note. For
+better accuracy, add a key to `.env`:
 
 ```bash
 cp .env.example .env
 # GROQ_API_KEY=gsk_...
 ```
 
-It picks up whichever key you have — no need to tell it which provider you
-meant. It prints the model it settled on at startup:
+Whichever key you set gets picked up. The model in use is printed at startup:
 
 ```
 asr=local  classifier=groq:llama-3.1-8b-instant  sink=grokbot
@@ -122,22 +119,19 @@ asr=local  classifier=groq:llama-3.1-8b-instant  sink=grokbot
 |---|---|---|
 | `groq` | `llama-3.1-8b-instant` | `whisper-large-v3-turbo` |
 | `openai` | `gpt-5.4-nano` | `gpt-transcribe` |
-| `gemini` | `gemini-3.5-flash-lite` | — use local or another provider |
+| `gemini` | `gemini-3.5-flash-lite` | use local or another provider |
 
-Groq is preferred when several keys are present, being the fastest and having a
-usable free tier. Force one with `--provider`. Pin a different model with
-`MURMUR_CHAT_MODEL`.
+Groq is preferred if you have several keys set. Use `--provider` to force one,
+and `MURMUR_CHAT_MODEL` to pin a different model.
 
-The same key can do transcription too, if you'd rather not run the local model
-(and it's the way to run it on an Intel Mac):
+The same key can do transcription too, which is how to run this on an Intel Mac:
 
 ```bash
 uv run murmur.py --asr groq
 ```
 
-Note `gpt-transcribe` is OpenAI's batch model. Its sibling `gpt-live-transcribe`
-is for streaming Realtime sessions and won't work here — it is handed
-completed files.
+Note that `gpt-transcribe` is OpenAI's model for completed audio files.
+`gpt-live-transcribe` is for streaming sessions and will not work here.
 
 ## Options
 
@@ -145,8 +139,8 @@ completed files.
 |---|---|---|
 | `--sink` | `grokbot` | `grokbot` or `webhook` |
 | `--agent` | *active one* | Grok Bot agent to send to, by name |
-| `--agents` | — | list your agents and exit |
-| `--webhook-url` | — | where to POST |
+| `--agents` | | list your agents and exit |
+| `--webhook-url` | | where to POST |
 | `--notes-dir` | *discard* | keep non-requests as markdown |
 | `--asr` | `local` | `local`, `groq`, `openai` |
 | `--classifier` | `auto` | `auto`, `llm`, `heuristic` |
@@ -157,50 +151,51 @@ completed files.
 | `--dry-run` | off | print, don't send |
 | `--once` | off | single pass, then exit |
 
-Every flag also reads from an env var (`MURMUR_SINK`, `MURMUR_NOTES_DIR`, …),
-via `.env` or your shell.
+Every flag also reads from an env var (`MURMUR_SINK`, `MURMUR_NOTES_DIR` and so
+on), via `.env` or your shell.
 
-## Running it in the background
+## Running in the background
 
 ```bash
 nohup uv run murmur.py > ~/murmur.log 2>&1 &
 ```
 
-For something that survives reboots, wrap it in a LaunchAgent — but try it in
-the foreground first.
+For something that survives reboots, wrap it in a LaunchAgent. Try it in the
+foreground first.
 
 ## Troubleshooting
 
-**"Could not find your Voice Memos folder"** — record one memo first. If it's
-still not found, your terminal may need Full Disk Access in System Settings ›
+**"Could not find your Voice Memos folder"**. Record one memo first. If it is
+still not found, your terminal may need Full Disk Access in System Settings >
 Privacy & Security, or you can pass `--memos-dir` directly.
 
-**"no Grok Bot credentials"** — the desktop app isn't installed or signed in on
-this machine. That file only exists where the app runs.
+**"no Grok Bot credentials"**. The desktop app is not installed or not signed in
+on this machine. That file only exists where the app runs.
 
-**Transcription is wrong** — parakeet is verbatim, so it keeps your "um"s and
-occasionally mangles proper nouns. Try a bigger model with
+**Transcription is wrong**. parakeet is verbatim, so it keeps your "um"s and
+sometimes mangles proper nouns. Try a bigger model with
 `MURMUR_ASR_MODEL=mlx-community/parakeet-tdt-1.1b`.
 
-## Testing the classifier
+## Tests
 
 ```bash
 uv run test_classify.py
+uv run test_sinks.py
 ```
 
-18 realistic memos (requests and notes) plus 9 verdict-parsing cases, all
-checked against the no-API rule.
+18 memos checked against the no-API rule, 9 cases for reading a model's answer,
+and the webhook and note paths against a local server.
 
-## Notes
+## About the Grok Bot connection
 
-Grok Bot has no official API and no CLI. The `grokbot` sink drives the same
-undocumented HTTP gateway the desktop app itself uses when you type in the chat
-box — `POST /api/sendPrompt`, with `listAgents` for the roster — authenticated
-with credentials the app writes to `~/.grokbot/` and rotates. It is not a
-localhost endpoint: the call goes over HTTPS to the VM your agent runs on, and
-only the credentials are local.
+Grok Bot has no official API and no CLI. This uses the same undocumented HTTP
+endpoints the desktop app itself uses, `POST /api/sendPrompt` and `listAgents`,
+with credentials the app writes to `~/.grokbot/` and rotates.
 
-It works, and it is unsupported. Expect it to break on app updates. The webhook
-sink is the stable option.
+It is not a localhost endpoint. The call goes over HTTPS to the VM your agent
+runs on, and only the credentials are local.
+
+It works, but it is unsupported and may break when the app updates. The webhook
+sink does not have that problem.
 
 MIT.
