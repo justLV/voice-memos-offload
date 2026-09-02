@@ -18,8 +18,8 @@ There is no install step. uv reads the dependencies declared at the top of
 
 ```
 Voice Memos  ->  parakeet-mlx  ->  classifier  ->  your agent
-  (.m4a)         on-device ASR    request or        Grok Bot
-                                     note?          or webhook
+  (.m4a)         on-device ASR    request or       Grok Bot routine
+                                     note?          or any webhook
 ```
 
 Transcription runs on your Mac with
@@ -55,20 +55,30 @@ uv run murmur.py --backfill 3
 
 ## Where requests go
 
-Grok Bot is the default and needs no setup. If the desktop app is installed and
-signed in, the credentials it stores on your machine are used to send into your
-chat thread.
+The default sink wakes a **Grok Bot routine** through Cursor's automation
+webhook. Set it up once:
 
-By default it sends to whichever agent is active in the app, so switching agents
-changes where your memos land. Pin one instead:
+1. In the Grok Bot desktop app, create a routine. Give it instructions along the
+   lines of *"the payload holds one voice-note transcription in `context`. It was
+   dictated, so expect filler words and transcription errors — infer intent.
+   Answer it directly and don't ask clarifying questions, nobody is watching."*
+2. Add a trigger, choose **webhook**, and copy the **POST URL** and **sender key**
+   off the trigger card. They are shown on desktop only, not on iOS.
+3. Put both in `.env`:
 
 ```bash
-uv run murmur.py --agents           # list them
-uv run murmur.py --agent Assistant  # always send here
+MURMUR_WEBHOOK_URL=https://api2.cursor.sh/automations/webhook/<routine-id>
+MURMUR_WEBHOOK_TOKEN=crsr_<sender-key>
 ```
 
-Or set `MURMUR_AGENT=Assistant` in `.env`. Pick an agent that can delegate, and
-let it decide what to do with each request.
+Then `uv run murmur.py`. Each request is POSTed as `{"context": "..."}` and the
+routine answers in its own thread, so turn on notifications for that bot or the
+answers just sit there.
+
+One caveat worth knowing before you lean on it: a webhook wake is not treated as
+you typing, so a routine that tries to *act* on the outside world — send mail,
+buy something — can still stop at an approval card. Questions and research come
+back unattended; outbound actions may not.
 
 For anything else, such as Hermes, openclaw, n8n, Home Assistant, a Shortcut or
 your own server:
@@ -89,6 +99,14 @@ It POSTs:
 ```
 
 Set `MURMUR_WEBHOOK_TOKEN` to have it sent as a bearer token.
+
+### The old Grok Bot sink
+
+`--sink grokbot` pushed straight into the desktop app's own gateway, using
+credentials the app left in `~/.grokbot/`. Desktop app 0.36 and later encrypt
+that file, so those credentials can no longer be read and the sink only works on
+much older versions. It is kept for anyone still on one; everyone else wants
+`--sink cursor` above.
 
 ## Keeping your notes
 
@@ -112,7 +130,7 @@ cp .env.example .env
 Whichever key you set gets picked up. The model in use is printed at startup:
 
 ```
-asr=local  classifier=groq:llama-3.1-8b-instant  sink=grokbot
+asr=local  classifier=groq:llama-3.1-8b-instant  sink=cursor/routine webhook @ api2.cursor.sh
 ```
 
 | Provider | Classifier | Transcription |
@@ -137,16 +155,17 @@ Note that `gpt-transcribe` is OpenAI's model for completed audio files.
 
 | Flag | Default | |
 |---|---|---|
-| `--sink` | `grokbot` | `grokbot` or `webhook` |
-| `--agent` | *active one* | Grok Bot agent to send to, by name |
-| `--agents` | | list your agents and exit |
-| `--webhook-url` | | where to POST |
+| `--sink` | `cursor` | `cursor`, `webhook` or `grokbot` |
+| `--agent` | *active one* | `--sink grokbot` only: agent to send to, by name |
+| `--agents` | | `--sink grokbot` only: list your agents and exit |
+| `--webhook-url` | | where to POST: the routine's URL, or your own |
+| `--webhook-token` | | bearer token; the sender key for `--sink cursor` |
 | `--notes-dir` | *discard* | keep non-requests as markdown |
 | `--asr` | `local` | `local`, `groq`, `openai` |
 | `--classifier` | `auto` | `auto`, `llm`, `heuristic` |
 | `--provider` | *auto* | force `groq`, `openai` or `gemini` |
 | `--memos-dir` | *auto-detected* | override the Voice Memos folder |
-| `--prefix` | `[from voice memo] ` | prepended for Grok Bot |
+| `--prefix` | `[from voice memo] ` | prepended for `cursor` and `grokbot` |
 | `--backfill N` | `0` | process N recent memos on first run |
 | `--dry-run` | off | print, don't send |
 | `--once` | off | single pass, then exit |
@@ -169,8 +188,18 @@ foreground first.
 still not found, your terminal may need Full Disk Access in System Settings >
 Privacy & Security, or you can pass `--memos-dir` directly.
 
-**"no Grok Bot credentials"**. The desktop app is not installed or not signed in
-on this machine. That file only exists where the app runs.
+**"the webhook rejected this (HTTP 401/403/404)"**. The POST URL or sender key
+is wrong, or the routine was deleted. Recheck both on the routine's trigger card
+in the desktop app — the key starts `crsr_`, and is passed without the `Bearer `
+prefix.
+
+**"Grok Bot's local gateway is no longer reachable"**. You are on `--sink
+grokbot` with a current desktop app, which encrypts the credentials that sink
+needs. Switch to `--sink cursor`.
+
+**"no Grok Bot credentials"**. `--sink grokbot` only: the desktop app is not
+installed or not signed in on this machine. That file only exists where the app
+runs.
 
 **Transcription is wrong**. parakeet is verbatim, so it keeps your "um"s and
 sometimes mangles proper nouns. Try a bigger model with
@@ -188,14 +217,18 @@ and the webhook and note paths against a local server.
 
 ## About the Grok Bot connection
 
-Grok Bot has no official API and no CLI. This uses the same undocumented HTTP
-endpoints the desktop app itself uses, `POST /api/sendPrompt` and `listAgents`,
-with credentials the app writes to `~/.grokbot/` and rotates.
+The `cursor` sink posts to the same automation webhook endpoint the desktop app
+gives you on a routine's trigger card. The URL and sender key are stable, so
+there is nothing to re-read or refresh between sends.
 
-It is not a localhost endpoint. The call goes over HTTPS to the VM your agent
-runs on, and only the credentials are local.
+The retired `grokbot` sink worked differently, and the difference is why it
+stopped working. It called undocumented endpoints the desktop app uses for
+itself, `POST /api/sendPrompt` and `listAgents`, with credentials the app left in
+`~/.grokbot/` and rotated on every restart of your agent's VM. Despite appearances
+that was never a localhost endpoint: the call went over HTTPS to the VM, and only
+the credentials were local. Desktop app 0.36 encrypts that file, and the sink has
+no way in.
 
-It works, but it is unsupported and may break when the app updates. The webhook
-sink does not have that problem.
+Treat the webhook as the supported path and that one as history.
 
 MIT.

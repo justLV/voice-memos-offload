@@ -354,6 +354,12 @@ def grokbot_conn() -> tuple[str, dict] | None:
         print("    Is the Grok Bot desktop app installed and signed in?")
         return None
     conn = json.loads(GROKBOT_CONN.read_text())
+    if conn.get("sandSealedFile") or not conn.get("baseUrl") or not conn.get("token"):
+        print("  ! Grok Bot's local gateway is no longer reachable.")
+        print("    Desktop app 0.36 and later encrypt this file, so the baseUrl")
+        print("    and token can no longer be read out of it.")
+        print("    Use --sink cursor with a routine webhook instead — see the README.")
+        return None
     return conn["baseUrl"].rstrip("/"), {
         "authorization": f"Bearer {conn['token']}",
         "content-type": "application/json",
@@ -432,6 +438,42 @@ def send_grokbot(text: str, cfg: Config) -> bool:
     return bool(r.json().get("accepted"))
 
 
+def send_cursor(text: str, cfg: Config) -> bool:
+    """Wake a Grok Bot routine through Cursor's automation webhook.
+
+    Create a routine in the Grok Bot desktop app, add a webhook trigger, then
+    copy the POST URL and sender key off the trigger card — they are shown on
+    desktop only, not on iOS. What you send arrives as the routine's `context`,
+    so write the routine to answer whatever it finds there.
+
+    This is the supported replacement for the `grokbot` sink: a stable cloud
+    endpoint with a static per-routine key, rather than a per-box URL whose
+    credentials rotated on every restart.
+    """
+    if not cfg.webhook_url:
+        sys.exit("! --sink cursor needs --webhook-url (or MURMUR_WEBHOOK_URL)\n"
+                 "  Use the routine's POST URL, from its webhook trigger card.")
+    if not cfg.webhook_token:
+        sys.exit("! --sink cursor needs --webhook-token (or MURMUR_WEBHOOK_TOKEN)\n"
+                 "  Use the routine's sender key, shown beside the POST URL.")
+    r = httpx.post(
+        cfg.webhook_url,
+        headers={
+            "authorization": f"Bearer {cfg.webhook_token}",
+            "content-type": "application/json",
+        },
+        json={"context": text},
+        timeout=30,
+    )
+    if r.status_code in (401, 403, 404):
+        # A wrong URL or key fails identically on every future memo, so stop
+        # rather than retry the same rejection on every poll.
+        sys.exit(f"! the webhook rejected this (HTTP {r.status_code}): {r.text[:200]}\n"
+                 "  Recheck the POST URL and sender key on the trigger card.")
+    r.raise_for_status()
+    return True
+
+
 def send_webhook(text: str, cfg: Config) -> bool:
     """POST to anything: Hermes, openclaw, n8n, Shortcuts, your own server."""
     if not cfg.webhook_url:
@@ -454,7 +496,7 @@ def send_webhook(text: str, cfg: Config) -> bool:
     return True
 
 
-SINKS = {"grokbot": send_grokbot, "webhook": send_webhook}
+SINKS = {"cursor": send_cursor, "grokbot": send_grokbot, "webhook": send_webhook}
 
 
 def save_note(text: str, when: datetime, cfg: Config) -> None:
@@ -539,7 +581,7 @@ def handle(path: Path, cfg: Config) -> None:
         mark_seen(path.name)
         return
 
-    message = f"{cfg.prefix}{text}" if cfg.sink == "grokbot" else text
+    message = f"{cfg.prefix}{text}" if cfg.sink in ("grokbot", "cursor") else text
     if cfg.dry_run:
         target = f"grokbot/{cfg.agent or 'active agent'}" if cfg.sink == "grokbot" else cfg.sink
         print(f"  REQUEST → would send to {target}: {message}")
@@ -565,14 +607,23 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="examples:\n"
                "  uv run murmur.py --dry-run\n"
+               "  uv run murmur.py --sink cursor --webhook-url https://... "
+               "--webhook-token crsr_...\n"
                "  uv run murmur.py --sink webhook --webhook-url https://...\n"
                "  uv run murmur.py --notes-dir ~/Obsidian/voice\n",
     )
     ap.add_argument("--memos-dir", default=os.environ.get("MURMUR_MEMOS_DIR"))
-    ap.add_argument("--sink", default=os.environ.get("MURMUR_SINK", "grokbot"),
-                    choices=sorted(SINKS))
-    ap.add_argument("--webhook-url", default=os.environ.get("MURMUR_WEBHOOK_URL"))
-    ap.add_argument("--webhook-token", default=os.environ.get("MURMUR_WEBHOOK_TOKEN"))
+    ap.add_argument("--sink", default=os.environ.get("MURMUR_SINK", "cursor"),
+                    choices=sorted(SINKS),
+                    help="cursor: a Grok Bot routine webhook (default). "
+                         "webhook: any endpoint of your own. "
+                         "grokbot: the retired desktop gateway")
+    ap.add_argument("--webhook-url", default=os.environ.get("MURMUR_WEBHOOK_URL"),
+                    help="for --sink cursor: the routine's POST URL. "
+                         "for --sink webhook: your own endpoint")
+    ap.add_argument("--webhook-token", default=os.environ.get("MURMUR_WEBHOOK_TOKEN"),
+                    help="sent as: Authorization: Bearer <token>. "
+                         "for --sink cursor this is the routine's sender key")
     ap.add_argument("--notes-dir", default=os.environ.get("MURMUR_NOTES_DIR"),
                     help="keep non-requests as markdown here (default: discard)")
     ap.add_argument("--asr", default=os.environ.get("MURMUR_ASR", "local"),
@@ -584,10 +635,10 @@ def main() -> None:
                     choices=sorted(PROVIDERS),
                     help="default: whichever provider you have a key for")
     ap.add_argument("--agent", default=os.environ.get("MURMUR_AGENT"),
-                    help="Grok Bot agent to send to, by name or id "
+                    help="[--sink grokbot only] agent to send to, by name or id "
                          "(default: whichever is active in the app)")
     ap.add_argument("--agents", action="store_true",
-                    help="list your Grok Bot agents and exit")
+                    help="[--sink grokbot only] list your Grok Bot agents and exit")
     ap.add_argument("--prefix", default=os.environ.get("MURMUR_PREFIX", "[from voice memo] "))
     ap.add_argument("--poll", type=float, default=3.0)
     ap.add_argument("--backfill", type=int, default=0, metavar="N",
@@ -644,6 +695,11 @@ def main() -> None:
     where = cfg.sink
     if cfg.sink == "grokbot":
         where += f"/{cfg.agent}" if cfg.agent else "/active agent (set --agent to pin one)"
+    elif cfg.sink == "cursor":
+        # Show the host only. The rest of the URL is the routine id, which is a
+        # credential in its own right and does not belong in terminal scrollback.
+        host = (cfg.webhook_url or "").split("/")[2] if "//" in (cfg.webhook_url or "") else "?"
+        where += f"/routine webhook @ {host}"
     print(f"Voice Memos Offload — watching {memos}")
     print(f"  asr={cfg.asr}  classifier={how}  sink={where}"
           + ("  [dry run]" if cfg.dry_run else ""))
