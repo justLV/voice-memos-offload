@@ -58,13 +58,37 @@ uv run murmur.py --backfill 3
 The default sink wakes a **Grok Bot routine** through Cursor's automation
 webhook. Set it up once:
 
-1. In the Grok Bot desktop app, create a routine. Give it instructions along the
-   lines of *"the payload holds one voice-note transcription in `context`. It was
-   dictated, so expect filler words and transcription errors — infer intent.
-   Answer it directly and don't ask clarifying questions, nobody is watching."*
+1. In the Grok Bot desktop app, create a routine and give it these instructions:
+
+   > You handle voice note requests. The webhook payload contains a single
+   > voice-note transcription in `context`, prefixed with the capture device it
+   > came from. It was dictated, so expect filler words, false starts and
+   > transcription errors — infer intent rather than reading literally. Answer
+   > the request directly: research it, then reply with a short, concrete
+   > answer. If the request is ambiguous, answer the most likely reading and
+   > state what you assumed. Do not ask clarifying questions — nobody is
+   > watching this thread live.
+
+   That last line matters. A webhook run has no one in the loop, so a routine
+   that asks a question just stalls.
+
 2. Add a trigger, choose **webhook**, and copy the **POST URL** and **sender key**
    off the trigger card. They are shown on desktop only, not on iOS.
-3. Put both in `.env`:
+
+3. Check the routine wakes, before involving murmur at all:
+
+   ```bash
+   curl -X POST https://api2.cursor.sh/automations/webhook/<routine-id> \
+     -H "Authorization: Bearer crsr_<sender-key>" \
+     -H "Content-Type: application/json" \
+     -d '{"context":"What is the tallest mountain in Japan? Reply with just the name."}'
+   ```
+
+   If the routine answers *Mount Fuji*, everything downstream is wiring. Doing
+   this first separates "is the webhook set up right" from "is the classifier
+   deciding correctly", which are much easier to debug apart than together.
+
+4. Put both values in `.env`:
 
 ```bash
 MURMUR_WEBHOOK_URL=https://api2.cursor.sh/automations/webhook/<routine-id>
@@ -74,6 +98,10 @@ MURMUR_WEBHOOK_TOKEN=crsr_<sender-key>
 Then `uv run murmur.py`. Each request is POSTed as `{"context": "..."}` and the
 routine answers in its own thread, so turn on notifications for that bot or the
 answers just sit there.
+
+You do not need a template variable for this. What you POST as `context` reaches
+the routine's prompt on its own — there is no `{{context}}` to write anywhere.
+The curl above is the quickest way to confirm that for yourself.
 
 One caveat worth knowing before you lean on it: a webhook wake is not treated as
 you typing, so a routine that tries to *act* on the outside world — send mail,
