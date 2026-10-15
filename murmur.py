@@ -21,6 +21,7 @@ Nothing to install, no server, no API key required.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -331,6 +332,8 @@ def classify_llm(text: str, provider: str) -> bool | None:
 
 
 def classify(text: str, cfg: Config) -> bool:
+    if cfg.classifier == "off":
+        return True
     if cfg.classifier in ("auto", "llm"):
         if cfg.provider:
             verdict = classify_llm(text, cfg.provider)
@@ -345,6 +348,47 @@ def classify(text: str, cfg: Config) -> bool:
 # ---------------------------------------------------------------------------
 # Sinks
 # ---------------------------------------------------------------------------
+
+class Rejected(Exception):
+    """The sink will never accept this memo, so retrying it is pointless."""
+
+
+def send_sesame(path: Path, cfg: Config) -> bool:
+    """Upload the recording to a Sesame Voice Capture device.
+
+    Voice Capture takes recordings only and transcribes them itself, so this
+    sends the memo's audio, not the local transcript. Every answer's body says
+    what happened or what to fix, so it is printed as is.
+    """
+    if not cfg.webhook_url or not cfg.webhook_token:
+        sys.exit("! --sink sesame needs the device URL and secret\n"
+                 "  (MURMUR_WEBHOOK_URL and MURMUR_WEBHOOK_TOKEN).\n"
+                 "  Copy both from Voice Capture settings in the Sesame app.")
+    r = httpx.post(
+        cfg.webhook_url,
+        headers={
+            "authorization": f"Bearer {cfg.webhook_token}",
+            "content-type": "audio/mp4",
+            # Sesame accepts a retried upload once. Hashed, since headers must be ASCII.
+            "idempotency-key": hashlib.sha256(path.name.encode()).hexdigest(),
+            # Lets Sesame say how old a memo is when it arrives late, e.g. a backfill.
+            "x-recorded-at": str(int(path.stat().st_mtime * 1000)),
+        },
+        content=path.read_bytes(),
+        timeout=120,
+    )
+    if r.status_code in (401, 403, 404):
+        sys.exit(f"! Sesame rejected this device (HTTP {r.status_code}): {r.text}")
+    if r.status_code in (429, 502, 503):
+        # Rate limited or busy. Wait, so a retry does not land on every poll.
+        print(f"  ! {r.text}")
+        time.sleep(60)
+        return False
+    if r.status_code >= 400:
+        raise Rejected(r.text)
+    print(f"  {r.text}")
+    return True
+
 
 def grokbot_conn() -> tuple[str, dict] | None:
     """Base URL + headers. Credentials rotate when the box restarts, so this is
@@ -567,29 +611,41 @@ def handle(path: Path, cfg: Config) -> None:
         print("  still being written, will retry next pass")
         return
 
-    started = time.time()
-    text = transcribe(path, cfg)
-    if not text:
-        print("  (silence)")
-        mark_seen(path.name)
-        return
-    print(f'  "{text}"  [{time.time() - started:.1f}s]')
+    text = ""
+    # Sesame transcribes the recording itself, so with the classifier off there
+    # is nothing to do locally.
+    if not (cfg.sink == "sesame" and cfg.classifier == "off"):
+        started = time.time()
+        text = transcribe(path, cfg)
+        if not text:
+            print("  (silence)")
+            mark_seen(path.name)
+            return
+        print(f'  "{text}"  [{time.time() - started:.1f}s]')
 
-    if not classify(text, cfg):
-        print("  note — not sent")
-        save_note(text, datetime.fromtimestamp(path.stat().st_mtime), cfg)
-        mark_seen(path.name)
-        return
+        if not classify(text, cfg):
+            print("  note — not sent")
+            save_note(text, datetime.fromtimestamp(path.stat().st_mtime), cfg)
+            mark_seen(path.name)
+            return
 
     message = f"{cfg.prefix}{text}" if cfg.sink in ("grokbot", "cursor") else text
     if cfg.dry_run:
         target = f"grokbot/{cfg.agent or 'active agent'}" if cfg.sink == "grokbot" else cfg.sink
-        print(f"  REQUEST → would send to {target}: {message}")
+        sending = "the recording" if cfg.sink == "sesame" else message
+        print(f"  REQUEST → would send to {target}: {sending}")
         mark_seen(path.name)
         return
 
     try:
-        ok = SINKS[cfg.sink](message, cfg)
+        if cfg.sink == "sesame":
+            ok = send_sesame(path, cfg)
+        else:
+            ok = SINKS[cfg.sink](message, cfg)
+    except Rejected as e:
+        print(f"  ! {e}\n    skipped; the memo is still in Voice Memos")
+        mark_seen(path.name)
+        return
     except Exception as e:
         print(f"  ! send failed ({type(e).__name__}: {e}) — will retry next pass")
         return  # deliberately not marked seen, so it retries
@@ -607,30 +663,35 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="examples:\n"
                "  uv run murmur.py --dry-run\n"
+               "  uv run murmur.py --classifier off\n"
                "  uv run murmur.py --sink cursor --webhook-url https://... "
                "--webhook-token crsr_...\n"
                "  uv run murmur.py --sink webhook --webhook-url https://...\n"
                "  uv run murmur.py --notes-dir ~/Obsidian/voice\n",
     )
     ap.add_argument("--memos-dir", default=os.environ.get("MURMUR_MEMOS_DIR"))
-    ap.add_argument("--sink", default=os.environ.get("MURMUR_SINK", "cursor"),
-                    choices=sorted(SINKS),
-                    help="cursor: a Grok Bot routine webhook (default). "
+    ap.add_argument("--sink", default=os.environ.get("MURMUR_SINK", "sesame"),
+                    choices=sorted([*SINKS, "sesame"]),
+                    help="sesame: Sesame's Voice Capture app (default). "
+                         "cursor: a Grok Bot routine webhook. "
                          "webhook: any endpoint of your own. "
                          "grokbot: the retired desktop gateway")
     ap.add_argument("--webhook-url", default=os.environ.get("MURMUR_WEBHOOK_URL"),
-                    help="for --sink cursor: the routine's POST URL. "
+                    help="for --sink sesame: the Voice Capture device URL. "
+                         "for --sink cursor: the routine's POST URL. "
                          "for --sink webhook: your own endpoint")
     ap.add_argument("--webhook-token", default=os.environ.get("MURMUR_WEBHOOK_TOKEN"),
                     help="sent as: Authorization: Bearer <token>. "
-                         "for --sink cursor this is the routine's sender key")
+                         "for --sink sesame this is the device secret, "
+                         "for --sink cursor the routine's sender key")
     ap.add_argument("--notes-dir", default=os.environ.get("MURMUR_NOTES_DIR"),
                     help="keep non-requests as markdown here (default: discard)")
     ap.add_argument("--asr", default=os.environ.get("MURMUR_ASR", "local"),
                     choices=["local", "groq", "openai"])
     ap.add_argument("--classifier", default=os.environ.get("MURMUR_CLASSIFIER", "auto"),
-                    choices=["auto", "llm", "heuristic"],
-                    help="auto: use an API key if present, else a local rule")
+                    choices=["auto", "llm", "heuristic", "off"],
+                    help="auto: use an API key if present, else a local rule. "
+                         "off: send every memo")
     ap.add_argument("--provider", default=os.environ.get("MURMUR_PROVIDER"),
                     choices=sorted(PROVIDERS),
                     help="default: whichever provider you have a key for")
@@ -688,18 +749,22 @@ def main() -> None:
     first_run = not SEEN_FILE.exists()
     # Say plainly which classifier is actually in play, so a missing key is
     # visible up front rather than a silent downgrade.
-    if cfg.classifier != "heuristic" and cfg.provider:
+    if cfg.classifier == "off":
+        how = "off (every memo is sent)"
+    elif cfg.classifier != "heuristic" and cfg.provider:
         how = f"{cfg.provider}:{os.environ.get('MURMUR_CHAT_MODEL', PROVIDERS[cfg.provider]['chat'])}"
     else:
         how = "heuristic (no API key — set one for sharper results)"
     where = cfg.sink
+    # Show the host only. The rest of the URL is the routine or device id, which
+    # is a credential in its own right and does not belong in terminal scrollback.
+    host = (cfg.webhook_url or "").split("/")[2] if "//" in (cfg.webhook_url or "") else "?"
     if cfg.sink == "grokbot":
         where += f"/{cfg.agent}" if cfg.agent else "/active agent (set --agent to pin one)"
     elif cfg.sink == "cursor":
-        # Show the host only. The rest of the URL is the routine id, which is a
-        # credential in its own right and does not belong in terminal scrollback.
-        host = (cfg.webhook_url or "").split("/")[2] if "//" in (cfg.webhook_url or "") else "?"
         where += f"/routine webhook @ {host}"
+    elif cfg.sink == "sesame":
+        where += f"/voice capture @ {host}"
     print(f"Voice Memos Offload — watching {memos}")
     print(f"  asr={cfg.asr}  classifier={how}  sink={where}"
           + ("  [dry run]" if cfg.dry_run else ""))

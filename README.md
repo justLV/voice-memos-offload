@@ -1,6 +1,6 @@
 # Voice Memos Offload
 
-Run this on an always on Mac device. Any voice memos you record from any iCloud sync'd Apple device will be transcribed, and routed as either a request to your agent or to your notes database.
+Run this on an always on Mac device. Any voice memos you record from any iCloud sync'd Apple device will be transcribed, and routed as either a request to your agent (Sesame by default) or to your notes database.
 
 ```bash
 uv run murmur.py
@@ -18,13 +18,15 @@ There is no install step. uv reads the dependencies declared at the top of
 
 ```
 Voice Memos  ->  parakeet-mlx  ->  classifier  ->  your agent
-  (.m4a)         on-device ASR    request or       Grok Bot routine
-                                     note?          or any webhook
+  (.m4a)         on-device ASR    request or       Sesame, a Grok Bot
+                                     note?          routine or any webhook
 ```
 
 Transcription runs on your Mac with
-[parakeet-mlx](https://github.com/senstella/parakeet-mlx), so no audio is
-uploaded. It takes about a second for a ten second memo once the model is loaded.
+[parakeet-mlx](https://github.com/senstella/parakeet-mlx). It takes about a
+second for a ten second memo once the model is loaded. Sesame takes the
+recording of each request and transcribes it itself; the other sinks get only
+the local transcript.
 
 Classification uses a local rule by default, which needs no API key. Add a key
 and it uses a hosted model instead.
@@ -53,9 +55,63 @@ send your back catalogue anywhere. To process recent ones anyway:
 uv run murmur.py --backfill 3
 ```
 
-## Where requests go
+## Sending requests to Sesame
 
-The default sink wakes a **Grok Bot routine** through Cursor's automation
+The default sink sends each request to Sesame through its **Voice Capture** app.
+Voice Capture takes recordings only, never text, so murmur uploads the memo's
+audio and Sesame transcribes it. Set it up once:
+
+1. In the Sesame app, open the apps list and choose **Voice Capture**. Tap
+   **Install**, then **Connect** to open its settings page.
+
+2. Under **Add a device**, find **Other device or script**. Give it a name and
+   tap **Add**. Sesame uses the name when it replies, so `Voice Memos app` or
+   `iPhone` reads well.
+
+3. Copy the **Device URL** and the **Secret** off the new device.
+
+4. Check the connection, before involving murmur at all:
+
+   ```bash
+   curl -X POST https://capture.sesameai.app/v1/devices/<device-id> \
+     -H "Authorization: Bearer sesame_whsec_<secret>" \
+     -H "X-Voice-Capture-Test: true"
+   ```
+
+   It answers `Connected to Sesame.`, and the settings page shows the device as
+   connected. Any other answer says what to fix.
+
+5. Put both values in `.env`:
+
+```bash
+MURMUR_WEBHOOK_URL=https://capture.sesameai.app/v1/devices/<device-id>
+MURMUR_WEBHOOK_TOKEN=sesame_whsec_<secret>
+```
+
+Then `uv run murmur.py`. Sesame answers each request in your chat with it, and
+its reply starts with what it heard from which device.
+
+To open the settings again later, ask Sesame to "open Voice Capture settings".
+Do not tap **Disconnect** on the app, since that removes every device.
+
+Sesame accepts up to 10 MB and about four minutes of speech per memo, and 60
+memos an hour from each device. A memo it cannot take is skipped with Sesame's
+reason, and stays in Voice Memos.
+
+### Sending every memo
+
+Since Sesame transcribes the recording itself, you can skip the local step and
+send every memo, notes included:
+
+```bash
+uv run murmur.py --classifier off
+```
+
+parakeet then never loads, and Sesame answers every memo.
+
+## Sending requests to a Grok Bot routine
+
+`--sink cursor` wakes a **Grok Bot routine** through Cursor's automation
 webhook. Set it up once:
 
 1. In the Grok Bot desktop app, create a routine and give it these instructions:
@@ -91,6 +147,7 @@ webhook. Set it up once:
 4. Put both values in `.env`:
 
 ```bash
+MURMUR_SINK=cursor
 MURMUR_WEBHOOK_URL=https://api2.cursor.sh/automations/webhook/<routine-id>
 MURMUR_WEBHOOK_TOKEN=crsr_<sender-key>
 ```
@@ -158,7 +215,7 @@ cp .env.example .env
 Whichever key you set gets picked up. The model in use is printed at startup:
 
 ```
-asr=local  classifier=groq:llama-3.1-8b-instant  sink=cursor/routine webhook @ api2.cursor.sh
+asr=local  classifier=groq:llama-3.1-8b-instant  sink=sesame/voice capture @ capture.sesameai.app
 ```
 
 | Provider | Classifier | Transcription |
@@ -183,14 +240,14 @@ Note that `gpt-transcribe` is OpenAI's model for completed audio files.
 
 | Flag | Default | |
 |---|---|---|
-| `--sink` | `cursor` | `cursor`, `webhook` or `grokbot` |
+| `--sink` | `sesame` | `sesame`, `cursor`, `webhook` or `grokbot` |
 | `--agent` | *active one* | `--sink grokbot` only: agent to send to, by name |
 | `--agents` | | `--sink grokbot` only: list your agents and exit |
-| `--webhook-url` | | where to POST: the routine's URL, or your own |
-| `--webhook-token` | | bearer token; the sender key for `--sink cursor` |
+| `--webhook-url` | | where to POST: the Sesame device URL, the routine's URL, or your own |
+| `--webhook-token` | | bearer token: the Sesame device secret, or the routine's sender key |
 | `--notes-dir` | *discard* | keep non-requests as markdown |
 | `--asr` | `local` | `local`, `groq`, `openai` |
-| `--classifier` | `auto` | `auto`, `llm`, `heuristic` |
+| `--classifier` | `auto` | `auto`, `llm`, `heuristic`, or `off` to send every memo |
 | `--provider` | *auto* | force `groq`, `openai` or `gemini` |
 | `--memos-dir` | *auto-detected* | override the Voice Memos folder |
 | `--prefix` | `[from voice memo] ` | prepended for `cursor` and `grokbot` |
@@ -215,6 +272,15 @@ foreground first.
 **"Could not find your Voice Memos folder"**. Record one memo first. If it is
 still not found, your terminal may need Full Disk Access in System Settings >
 Privacy & Security, or you can pass `--memos-dir` directly.
+
+**"Sesame rejected this device (HTTP 401/404)"**. The device URL or secret is
+wrong, or the device was removed. Copy both from Voice Capture settings again.
+**New URL and secret** there replaces both.
+
+**"skipped; the memo is still in Voice Memos"**. Sesame cannot take that
+recording, and the line above it says why. Usually the memo is too long. If
+Voice Memos records in Lossless, Compressed files are about a quarter of the
+size.
 
 **"the webhook rejected this (HTTP 401/403/404)"**. The POST URL or sender key
 is wrong, or the routine was deleted. Recheck both on the routine's trigger card
@@ -241,7 +307,7 @@ uv run test_sinks.py
 ```
 
 18 memos checked against the no-API rule, 9 cases for reading a model's answer,
-and the webhook and note paths against a local server.
+and the Sesame, webhook and note paths against a local server.
 
 ## About the Grok Bot connection
 

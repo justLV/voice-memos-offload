@@ -1,4 +1,4 @@
-"""Exercise the webhook sinks against a real local server, and the note writer.
+"""Exercise the Sesame and webhook sinks against a real local server, and the note writer.
 
 Run: uv run test_sinks.py
 """
@@ -26,12 +26,21 @@ received = {}
 class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         n = int(self.headers.get("content-length", 0))
-        received["body"] = json.loads(self.rfile.read(n))
+        raw = self.rfile.read(n)
+        received["raw"] = raw
+        received["headers"] = {k.lower(): v for k, v in self.headers.items()}
+        received["body"] = json.loads(raw) if received["headers"].get(
+            "content-type") == "application/json" else None
         received["auth"] = self.headers.get("authorization")
         if self.path == "/deny":
             self.send_response(401)
             self.end_headers()
             self.wfile.write(b'{"code":"error","message":"Invalid API key"}')
+            return
+        if self.path == "/too-large":
+            self.send_response(413)
+            self.end_headers()
+            self.wfile.write(b"The recording is too large. Sesame accepts up to 10 MB.")
             return
         self.send_response(200)
         self.end_headers()
@@ -97,6 +106,66 @@ except SystemExit as e:
     print("PASS: bad credentials stop the run instead of looping")
 else:
     raise AssertionError("expected SystemExit on 401")
+
+print("\n--- sesame sink ---")
+received.clear()
+memo = tmp / "20261015 101112-ABCD1234.m4a"
+memo.write_bytes(b"\x00\x00\x00\x18ftypM4A not really audio")
+cfg_sesame = murmur.Config(**{**cfg.__dict__, "sink": "sesame",
+                              "webhook_url": f"http://127.0.0.1:{port}/v1/devices/abc"})
+ok = murmur.send_sesame(memo, cfg_sesame)
+h = received["headers"]
+print("returned:", ok)
+print("headers:", {k: h.get(k) for k in ("content-type", "idempotency-key", "x-recorded-at")})
+
+assert ok
+# Voice Capture takes recordings only, so the body must be the memo's bytes.
+assert received["raw"] == memo.read_bytes()
+assert h["content-type"] == "audio/mp4"
+assert received["auth"] == "Bearer test-token-123"
+assert h["x-recorded-at"] == str(int(memo.stat().st_mtime * 1000))
+key = h["idempotency-key"]
+murmur.send_sesame(memo, cfg_sesame)
+assert received["headers"]["idempotency-key"] == key, "a retry must reuse the key"
+print("PASS: sesame sink uploaded the raw audio with a stable idempotency key")
+
+print("\n--- sesame sink skips a memo it can never accept ---")
+cfg_413 = murmur.Config(**{**cfg_sesame.__dict__,
+                           "webhook_url": f"http://127.0.0.1:{port}/too-large"})
+try:
+    murmur.send_sesame(memo, cfg_413)
+except murmur.Rejected as e:
+    print("rejected with:", e)
+    assert "too large" in str(e)
+    print("PASS: a 413 is a rejection, not a retry")
+else:
+    raise AssertionError("expected Rejected on 413")
+
+print("\n--- sesame sink stops on a bad device URL or secret ---")
+cfg_401s = murmur.Config(**{**cfg_sesame.__dict__,
+                            "webhook_url": f"http://127.0.0.1:{port}/deny"})
+try:
+    murmur.send_sesame(memo, cfg_401s)
+except SystemExit as e:
+    print("exited with:", str(e).splitlines()[0])
+    assert "401" in str(e)
+    print("PASS: bad device credentials stop the run")
+else:
+    raise AssertionError("expected SystemExit on 401")
+
+print("\n--- classifier off sends every memo to sesame without transcribing ---")
+# transcribe() would import parakeet-mlx, which this test does not install, so
+# reaching the upload proves the local step was skipped.
+received.clear()
+orig_state, orig_seen = murmur.STATE_DIR, murmur.SEEN_FILE
+murmur.STATE_DIR, murmur.SEEN_FILE = tmp / "state", tmp / "state" / "seen.txt"
+try:
+    murmur.handle(memo, murmur.Config(**{**cfg_sesame.__dict__, "classifier": "off"}))
+    assert received["raw"] == memo.read_bytes()
+    assert murmur.load_seen() == {memo.name}
+finally:
+    murmur.STATE_DIR, murmur.SEEN_FILE = orig_state, orig_seen
+print("PASS: memo uploaded and marked seen with no local transcription")
 
 print("\n--- sealed grokbot credentials degrade gracefully ---")
 # Desktop app 0.36+ encrypts this file. Reading it used to raise KeyError on
