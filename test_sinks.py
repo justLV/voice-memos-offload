@@ -153,6 +153,20 @@ except SystemExit as e:
 else:
     raise AssertionError("expected SystemExit on 401")
 
+print("\n--- sesame device is checked at startup ---")
+received.clear()
+murmur.connect_sesame(cfg_sesame)
+assert received["headers"]["x-voice-capture-test"] == "true" and not received["raw"]
+assert received["auth"] == "Bearer test-token-123"
+try:
+    murmur.connect_sesame(cfg_401s)
+except SystemExit as e:
+    print("exited with:", str(e).splitlines()[0])
+    assert "401" in str(e)
+else:
+    raise AssertionError("expected SystemExit on 401 at startup")
+print("PASS: startup sends an empty test event, and a bad device stops the run")
+
 print("\n--- classifier off sends every memo to sesame without transcribing ---")
 # transcribe() would import parakeet-mlx, which this test does not install, so
 # reaching the upload proves the local step was skipped.

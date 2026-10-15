@@ -40,26 +40,7 @@ and it uses a hosted model instead.
 
 ## First run
 
-```bash
-git clone https://github.com/justLV/voice-memos-offload
-cd voice-memos-offload
-uv run murmur.py --dry-run
-```
-
-`--dry-run` prints what it would send, without sending it.
-
-On the first run it marks your existing memos as already seen, so it will not
-send your back catalogue anywhere. To process recent ones anyway:
-
-```bash
-uv run murmur.py --backfill 3
-```
-
-## Sending requests to Sesame
-
-The default sink sends each request to Sesame through its **Voice Capture** app.
-Voice Capture takes recordings only, never text, so murmur uploads the memo's
-audio and Sesame transcribes it. Set it up once:
+Requests go to Sesame by default, through its **Voice Capture** app.
 
 1. In the Sesame app, open the apps list and choose **Voice Capture**. Tap
    **Install**, then **Connect** to open its settings page.
@@ -68,28 +49,49 @@ audio and Sesame transcribes it. Set it up once:
    tap **Add**. Sesame uses the name when it replies, so `Voice Memos app` or
    `iPhone` reads well.
 
-3. Copy the **Device URL** and the **Secret** off the new device.
-
-4. Check the connection, before involving murmur at all:
+3. Run murmur, and paste the new device's **Device URL** and **Secret** when it
+   asks:
 
    ```bash
-   curl -X POST https://capture.sesameai.app/v1/devices/<device-id> \
-     -H "Authorization: Bearer sesame_whsec_<secret>" \
-     -H "X-Voice-Capture-Test: true"
+   git clone https://github.com/justLV/voice-memos-offload
+   cd voice-memos-offload
+   uv run murmur.py
    ```
 
-   It answers `Connected to Sesame.`, and the settings page shows the device as
-   connected. Any other answer says what to fix.
+   It checks them with Sesame, prints `Connected to Sesame.`, and saves them to
+   `.env`. The settings page now shows the device as connected.
 
-5. Put both values in `.env`:
+4. Record a memo such as "Can you tell me what the tallest mountain in Japan
+   is?". Sesame answers in your chat with it, and its reply starts with what it
+   heard from which device.
+
+If macOS blocks access to Voice Memos, give your terminal app Full Disk Access in
+System Settings > Privacy & Security, then reopen it.
+
+On the first run it marks your existing memos as already seen, so it will not
+send your back catalogue anywhere. To process recent ones anyway:
+
+```bash
+uv run murmur.py --backfill 3
+```
+
+`--dry-run` prints what it would send, without sending it.
+
+## More about Sesame
+
+Voice Capture takes recordings only, never text, so murmur uploads the memo's
+audio and Sesame transcribes it. The local transcript only decides whether a
+memo is a request.
+
+To skip the prompt, put both values in `.env` yourself:
 
 ```bash
 MURMUR_WEBHOOK_URL=https://capture.sesameai.app/v1/devices/<device-id>
 MURMUR_WEBHOOK_TOKEN=sesame_whsec_<secret>
 ```
 
-Then `uv run murmur.py`. Sesame answers each request in your chat with it, and
-its reply starts with what it heard from which device.
+murmur checks the device each time it starts, so a wrong URL or secret stops it
+straight away with Sesame's reason.
 
 To open the settings again later, ask Sesame to "open Voice Capture settings".
 Do not tap **Disconnect** on the app, since that removes every device.
@@ -260,6 +262,8 @@ on), via `.env` or your shell.
 
 ## Running in the background
 
+Run it once in a terminal first, so it can ask for your Sesame device. Then:
+
 ```bash
 nohup uv run murmur.py > ~/murmur.log 2>&1 &
 ```
@@ -269,13 +273,17 @@ foreground first.
 
 ## Troubleshooting
 
-**"Could not find your Voice Memos folder"**. Record one memo first. If it is
-still not found, your terminal may need Full Disk Access in System Settings >
-Privacy & Security, or you can pass `--memos-dir` directly.
+**"macOS blocks access to your Voice Memos folder"**. Give your terminal app
+Full Disk Access in System Settings > Privacy & Security > Full Disk Access,
+then reopen it.
 
-**"Sesame rejected this device (HTTP 401/404)"**. The device URL or secret is
-wrong, or the device was removed. Copy both from Voice Capture settings again.
-**New URL and secret** there replaces both.
+**"Could not find your Voice Memos folder"**. Record one memo first. If it is
+still not found, pass `--memos-dir` directly.
+
+**"Sesame did not accept this device"** or **"Sesame rejected this device
+(HTTP 401/404)"**. The device URL or secret is wrong, or the device was removed.
+Copy both from Voice Capture settings again and fix them in `.env`, or delete
+those two lines to be asked again. **New URL and secret** there replaces both.
 
 **"skipped; the memo is still in Voice Memos"**. Sesame cannot take that
 recording, and the line above it says why. Usually the memo is too long. If

@@ -47,6 +47,9 @@ MEMO_DIRS = [
     "~/Library/Mobile Documents/com~apple~VoiceMemos/Documents",
 ]
 
+# Next to the script, so it is found whichever folder murmur runs from.
+ENV_FILE = Path(__file__).with_name(".env")
+
 STATE_DIR = Path(
     os.environ.get("XDG_STATE_HOME", "~/.local/state")
 ).expanduser() / "murmur"
@@ -158,6 +161,19 @@ def find_memos_dir(override: str | None) -> Path:
         # If several exist, trust whichever was written to most recently.
         return max(found, key=lambda p: max(f.stat().st_mtime for f in p.glob("*.m4a")))
 
+    # glob() reads a folder macOS blocks as empty, so ask directly.
+    for p in candidates:
+        try:
+            os.listdir(p)
+        except PermissionError:
+            sys.exit(
+                "! macOS blocks access to your Voice Memos folder.\n"
+                "  Give your terminal app Full Disk Access in System Settings >\n"
+                "  Privacy & Security > Full Disk Access, then reopen it and run this again."
+            )
+        except OSError:
+            pass
+
     # Nothing in the usual places — ask Spotlight where the recordings went.
     try:
         out = subprocess.run(
@@ -198,16 +214,21 @@ def to_wav(src: Path, dst: Path) -> Path:
     return dst
 
 
-def transcribe_local(audio: Path) -> str:
+def load_local_model():
     global _model
     if _model is None:
         from parakeet_mlx import from_pretrained  # imported lazily: it's a big import
 
         print(f"  loading {ASR_MODEL} (first run downloads it)...", flush=True)
         _model = from_pretrained(ASR_MODEL)
+    return _model
+
+
+def transcribe_local(audio: Path) -> str:
+    model = load_local_model()
     wav = to_wav(audio, audio.parent / f".murmur-{audio.stem}.wav")
     try:
-        return _model.transcribe(str(wav)).text.strip()
+        return model.transcribe(str(wav)).text.strip()
     finally:
         wav.unlink(missing_ok=True)
 
@@ -351,6 +372,56 @@ def classify(text: str, cfg: Config) -> bool:
 
 class Rejected(Exception):
     """The sink will never accept this memo, so retrying it is pointless."""
+
+
+SESAME_SETUP = """\
+  To connect Sesame: in the Sesame app, open the apps list, choose Voice Capture,
+  and tap Install, then Connect. Under Add a device, add an "Other device or
+  script" device, and copy its Device URL and Secret."""
+
+
+def connect_sesame(cfg: Config) -> None:
+    """Check the Voice Capture device at startup, asking for it on first run.
+
+    A wrong URL or secret then fails now, rather than on the first memo hours
+    later. The test also marks the device connected in Sesame's settings.
+    """
+    asked = not (cfg.webhook_url and cfg.webhook_token)
+    if asked:
+        if not sys.stdin.isatty():
+            sys.exit("! --sink sesame needs a device URL and secret.\n" + SESAME_SETUP + "\n"
+                     "  Then run murmur in a terminal to paste them, or set\n"
+                     "  MURMUR_WEBHOOK_URL and MURMUR_WEBHOOK_TOKEN in .env.")
+        print(SESAME_SETUP)
+        cfg.webhook_url = input("  Device URL: ").strip()
+        cfg.webhook_token = input("  Secret: ").strip()
+    try:
+        r = httpx.post(
+            cfg.webhook_url,
+            headers={"authorization": f"Bearer {cfg.webhook_token}",
+                     "x-voice-capture-test": "true"},
+            timeout=30,
+        )
+    except httpx.HTTPError as e:
+        if asked:
+            sys.exit(f"! could not reach Sesame ({type(e).__name__}: {e})")
+        # Likely no network yet, e.g. right after login. Memos retry on their own.
+        print(f"  ! could not reach Sesame yet ({type(e).__name__}), carrying on")
+        return
+    if r.status_code in (401, 403, 404) or (asked and r.status_code != 200):
+        sys.exit(f"! Sesame did not accept this device (HTTP {r.status_code}): {r.text}")
+    print(f"  {r.text}")
+    if asked:
+        with ENV_FILE.open("a") as f:
+            f.write(f"MURMUR_WEBHOOK_URL={cfg.webhook_url}\n"
+                    f"MURMUR_WEBHOOK_TOKEN={cfg.webhook_token}\n")
+        print(f"  saved to {ENV_FILE}")
+
+
+def transcribes_locally(cfg: Config) -> bool:
+    """Sesame transcribes the recording itself, so with the classifier off there
+    is nothing to do locally."""
+    return not (cfg.sink == "sesame" and cfg.classifier == "off")
 
 
 def send_sesame(path: Path, cfg: Config) -> bool:
@@ -612,9 +683,7 @@ def handle(path: Path, cfg: Config) -> None:
         return
 
     text = ""
-    # Sesame transcribes the recording itself, so with the classifier off there
-    # is nothing to do locally.
-    if not (cfg.sink == "sesame" and cfg.classifier == "off"):
+    if transcribes_locally(cfg):
         started = time.time()
         text = transcribe(path, cfg)
         if not text:
@@ -658,6 +727,7 @@ def handle(path: Path, cfg: Config) -> None:
 
 def main() -> None:
     load_dotenv()
+    load_dotenv(ENV_FILE)
     ap = argparse.ArgumentParser(
         description="Voice memos → your agent.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -746,6 +816,9 @@ def main() -> None:
         if not resolve_agent(*got, cfg)[0]:
             sys.exit(1)
 
+    if cfg.sink == "sesame" and not cfg.dry_run:
+        connect_sesame(cfg)
+
     first_run = not SEEN_FILE.exists()
     # Say plainly which classifier is actually in play, so a missing key is
     # visible up front rather than a silent downgrade.
@@ -765,10 +838,15 @@ def main() -> None:
         where += f"/routine webhook @ {host}"
     elif cfg.sink == "sesame":
         where += f"/voice capture @ {host}"
+    asr = cfg.asr if transcribes_locally(cfg) else "sesame"
     print(f"Voice Memos Offload — watching {memos}")
-    print(f"  asr={cfg.asr}  classifier={how}  sink={where}"
+    print(f"  asr={asr}  classifier={how}  sink={where}"
           + ("  [dry run]" if cfg.dry_run else ""))
     seen = baseline(memos, a.backfill) if first_run else load_seen()
+    # Load now, so a first-run download or a broken install shows up here
+    # rather than on the first memo.
+    if asr == "local":
+        load_local_model()
 
     try:
         while True:
